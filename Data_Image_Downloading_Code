@@ -1,0 +1,201 @@
+import pandas as pd
+df = pd.read_csv("~/Desktop/DAT_490/confirmed_US_fires_MODIS.csv")
+df["acq_date"] = pd.to_datetime(df["acq_date"])
+df
+
+#--------------------------------------------------------------------------------------------------------------------------------
+
+from sentinelhub import SHConfig
+
+config = SHConfig()
+config.sh_client_id = "55509090-0038-47a5-a660-97798aff149c"
+config.sh_client_secret = "YYQME2j20V56scc47evtGWvt7d9ZFcSD"
+config.instance_id = "your-instance-id"
+
+# Enable if using an on-prem Sentinel Hub instance
+# config.sh_base_url = "https://services.sentinel-hub.com"
+
+if not config.sh_client_id or not config.sh_client_secret:
+    raise ValueError("You must set Sentinel Hub API credentials!")
+
+#--------------------------------------------------------------------------------------------------------------------------------
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from sentinelhub import SentinelHubRequest, DataCollection, MimeType, bbox_to_dimensions, BBox
+
+# Define image resolution
+IMAGE_SIZE = 512  # Pixels
+
+# Sentinel Hub Evalscript for RGB image
+evalscript_true_color = """
+// Sentinel-2 True Color Image (RGB)
+function setup() {
+    return {
+        input: ["B04", "B03", "B02"],
+        output: { bands: 3 }
+    };
+}
+
+function evaluatePixel(sample) {
+    return [sample.B04, sample.B03, sample.B02];
+}
+"""
+
+# Infrared from Sentinel-2
+evalscript_infrared = """
+// Infrared visualization using SWIR, NIR, and Red bands
+function setup() {
+    return {
+        input: ["B12", "B08", "B04"],  // SWIR, NIR, Red
+        output: { bands: 3 }
+    };
+}
+
+function evaluatePixel(sample) {
+    return [sample.B12, sample.B08, sample.B04];
+}
+"""
+
+# Function to check if an image is black
+def is_black_image(image, threshold=0.02):
+    """Returns True if the image is mostly black (below threshold)."""
+    return np.mean(image) < threshold
+
+# Function to fetch and save an image
+def get_satellite_image(lat, lon, date, save_path, black_images_csv):
+    # Define bounding box (0.01 degree buffer ~1.1km)
+    bbox = BBox([lon - 0.01, lat - 0.01, lon + 0.01, lat + 0.01], crs=4326)
+    bbox_size = bbox_to_dimensions(bbox, resolution=10)  # 10m resolution
+
+    # Define Sentinel Hub request for RGB
+    request = SentinelHubRequest(
+        evalscript=evalscript_true_color,
+        input_data=[
+            SentinelHubRequest.input_data(
+                data_collection=DataCollection.SENTINEL2_L1C,
+                time_interval=(date.strftime("%Y-%m-%d"), (date + pd.Timedelta(days=2)).strftime("%Y-%m-%d")),
+                mosaicking_order="leastCC"  # Select image with least cloud cover
+            )
+        ],
+        responses=[SentinelHubRequest.output_response("default", MimeType.PNG)],
+        bbox=bbox,
+        size=bbox_size,
+        config=config
+    )
+
+    # Define Sentinel Hub request for Infrared
+    request_infrared = SentinelHubRequest(
+        evalscript=evalscript_infrared,
+        input_data=[
+            SentinelHubRequest.input_data(
+                data_collection=DataCollection.SENTINEL2_L1C,
+                time_interval=(date.strftime("%Y-%m-%d"), (date + pd.Timedelta(days=2)).strftime("%Y-%m-%d")),
+                maxcc=0.2
+            )
+        ],
+        responses=[SentinelHubRequest.output_response("default", MimeType.PNG)],
+        bbox=bbox,
+        size=[512, 512],
+        config=config
+    )
+
+    # Get image data
+    image = request.get_data()[0]
+    infrared_image = request_infrared.get_data()[0]
+
+    # Ensure save path exists
+    os.makedirs(save_path, exist_ok=True)
+
+    # Define filenames
+    rgb_image_path = os.path.join(save_path, f"{lat}_{lon}_{date.strftime('%Y%m%d')}_RGB.png")
+    infrared_image_path = os.path.join(save_path, f"{lat}_{lon}_{date.strftime('%Y%m%d')}_Infrared.png")
+
+    # Check if either image is black
+    rgb_black = is_black_image(image)
+    infrared_black = is_black_image(infrared_image)
+
+    if rgb_black or infrared_black:
+        # Log black image information to a CSV file
+        black_data = pd.DataFrame([[lat, lon, date.strftime('%Y-%m-%d'), rgb_black, infrared_black]],
+                                  columns=["Latitude", "Longitude", "Date", "RGB_Black", "Infrared_Black"])
+        
+        if not os.path.exists(black_images_csv):
+            black_data.to_csv(black_images_csv, index=False)  # Create CSV file
+        else:
+            black_data.to_csv(black_images_csv, mode='a', header=False, index=False)  # Append to existing file
+        
+        print(f"Black image detected at {lat}, {lon} on {date.strftime('%Y-%m-%d')}. Skipping saving.")
+        return  # Skip saving the image
+
+    # Save images if they are not black
+    plt.imsave(rgb_image_path, np.clip(image / 255.0, 0, 1))  # Normalize and save RGB image
+    plt.imsave(infrared_image_path, np.clip(infrared_image / 255.0, 0, 1))  # Normalize and save Infrared image
+
+    print(f"Saved RGB: {rgb_image_path}")
+    print(f"Saved Infrared: {infrared_image_path}")
+
+# Example call (for a single wildfire)
+get_satellite_image(34.5, -118.2, pd.to_datetime("2023-08-15"), "satellite_images", "black_images.csv")
+
+#--------------------------------------------------------------------------------------------------------------------------------
+
+# Directory to save images
+save_dir = "satellite_images" 
+black_images_csv = "black_images.csv"  # Define the CSV file for black images
+
+for index, row in df.head(15).iterrows():  # Adjust range to process more images
+    lat, lon, date = row["latitude"], row["longitude"], row["acq_date"]
+    get_satellite_image(lat, lon, date, save_dir, black_images_csv)
+
+#--------------------------------------------------------------------------------------------------------------------------------
+
+# Directory to save images
+save_dir = "satellite_images" 
+black_images_csv = "black_images.csv"  # Define the CSV file for black images
+
+# Skip the first 15 rows and process the rest
+for index, row in df.iloc[15:].iterrows():
+    lat, lon, date = row["latitude"], row["longitude"], row["acq_date"]
+    get_satellite_image(lat, lon, date, save_dir, black_images_csv)
+
+#--------------------------------------------------------------------------------------------------------------------------------
+
+import os
+import shutil
+
+# Define the source folder and number of partitions
+source_folder = "satellite_images"
+num_folders = 8
+
+# List all image files
+all_files = [f for f in os.listdir(source_folder) if os.path.isfile(os.path.join(source_folder, f))]
+total_files = len(all_files)
+files_per_folder = total_files // num_folders  # Divide images evenly
+
+# Create subfolders and distribute files
+for i in range(num_folders):
+    subfolder = os.path.join(source_folder, f"batch_{i+1}")
+    os.makedirs(subfolder, exist_ok=True)  # Create subfolder if it doesn't exist
+    
+    start_idx = i * files_per_folder
+    end_idx = (i + 1) * files_per_folder if i < num_folders - 1 else total_files  # Last batch gets all remaining files
+    
+    for file in all_files[start_idx:end_idx]:
+        shutil.move(os.path.join(source_folder, file), os.path.join(subfolder, file))
+
+print(f"Successfully split {total_files} images into {num_folders} folders.")
+
+#--------------------------------------------------------------------------------------------------------------------------------
+
+import shutil
+
+shutil.make_archive("satellite_images", "zip", "satellite_images")
+
+#--------------------------------------------------------------------------------------------------------------------------------
+
+from IPython.display import FileLink
+
+FileLink("satellite_images.zip")
