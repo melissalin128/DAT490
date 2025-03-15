@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta
 
 # Base directory where batch folders are located: Change for different users
-base_directory = "/Users/Rocco/Desktop/DAT_490/satellite_images"
+base_directory = "/content/drive/Shareddrives/DAT490 Capstone/Data Files"
 
 # Function to get image filenames from all batch folders
 def get_image_filenames_from_batches(base_directory):
