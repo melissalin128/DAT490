@@ -1,0 +1,91 @@
+import os
+import requests
+import pandas as pd
+import re
+from datetime import datetime, timedelta
+
+# Base directory where batch folders are located: Change for different users
+base_directory = "/Users/Rocco/Desktop/DAT_490/satellite_images"
+
+# Function to get image filenames from all batch folders
+def get_image_filenames_from_batches(base_directory):
+    image_filenames = []
+    for i in range(1, 9):  # Loop through batch_1 to batch_8
+        batch_folder = os.path.join(base_directory, f"batch_{i}")
+        if os.path.exists(batch_folder):
+            batch_files = [f for f in os.listdir(batch_folder) if f.endswith("_Infrared.png")]
+            image_filenames.extend(batch_files)
+    return image_filenames
+
+# Get all filenames from all batches
+image_filenames = get_image_filenames_from_batches(base_directory)
+
+def parse_filename(filename):
+    """Extract latitude, longitude, date from filename if it's an Infrared image."""
+    pattern = r"([-]?\d+\.\d+)_([-]?\d+\.\d+)_(\d{8})_Infrared\.png"
+    match = re.match(pattern, filename)
+    if match:
+        lat, lon, date = match.groups()
+        return float(lat), float(lon), date
+    return None
+
+def get_nasa_weather(lat, lon, start_date, days=7):
+    """Fetches precipitation, wind speed, and wind direction from NASA POWER API."""
+    
+    start = datetime.strptime(start_date, "%Y%m%d")
+    end = start + timedelta(days=days-1)
+    end_date = end.strftime("%Y%m%d")
+
+    url = f"https://power.larc.nasa.gov/api/temporal/daily/point?parameters=PRECTOTCORR,WS10M,WD10M&community=AG&longitude={lon}&latitude={lat}&start={start_date}&end={end_date}&format=JSON"
+
+    response = requests.get(url)
+    data = response.json()
+
+    if "properties" not in data or "parameter" not in data["properties"]:
+        print(f"Error fetching data for {lat}, {lon}, {start_date}")
+        return None
+
+    params = data["properties"]["parameter"]
+    if "PRECTOTCORR" not in params or "WS10M" not in params or "WD10M" not in params:
+        print(f"Missing data for {lat}, {lon}, {start_date}")
+        return None
+
+    weather_data = []
+    for date in params["PRECTOTCORR"]:
+        weather_data.append({
+            "date": date,
+            "latitude": lat,
+            "longitude": lon,
+            "precipitation": params["PRECTOTCORR"].get(date, "N/A"),
+            "wind_speed": params["WS10M"].get(date, "N/A"),
+            "wind_direction": params["WD10M"].get(date, "N/A"),
+        })
+    
+    return weather_data
+
+# Initialize a DataFrame to store weather data
+all_weather_records = []
+
+# Collect weather data and save as it goes
+for filename in image_filenames:
+    parsed = parse_filename(filename)
+    if parsed:
+        lat, lon, date = parsed
+        weather_data = get_nasa_weather(lat, lon, date, days=3)
+        if weather_data:
+            all_weather_records.extend(weather_data)
+            # Save the data to CSV after processing each batch of data
+            df = pd.DataFrame(all_weather_records)
+            df.to_csv("weather_data.csv", index=False)
+            print(f"Weather data saved for coordinates ({lat}, {lon}) for date {date}")
+    
+    # Optionally, you can save after every batch of images from each folder
+    print(f"Completed processing for {filename}. Saving progress...")
+
+    # Save to CSV after every batch
+    df = pd.DataFrame(all_weather_records)
+    df.to_csv("weather_data.csv", index=False)
+    print("Weather data saved to weather_data.csv")
+
+    # Print progress (after each image processed)
+    print(f"1 week of data downloaded for coordinates ({lat}, {lon}) for {date}.")
